@@ -1,0 +1,113 @@
+% Load data
+load('ratBEHstruct_unit_firstsection_trial3.mat');
+
+% included sessions (exclusively sessions with spike data)
+sessionList = [2, 5, 6, 10, 12, 13, 14];
+
+leverRTs_all = [];
+lickRTs_all = [];
+trialIdxs_all = [];
+trialCounterGlobal = 0;
+trials_final = struct();
+
+% in order to loop through selected sessions
+for s = 1:numel(sessionList)
+    sessionIdx = sessionList(s);
+    session = ratBEHstruct_unit(sessionIdx);
+
+    % Extract timestamps
+    cueTimes = vertcat(session.cuedTimes{:});
+    leverTimes = vertcat(session.pokeTimes{:});
+    lickTimes = session.LickOn;
+
+    trials = struct();
+    trialCounter = 0;
+    lastLickTime = -Inf;
+
+    for t = 1:length(cueTimes)-1
+        cue = cueTimes(t);
+        nextCue = cueTimes(t+1);
+        trialWindowEnd = cue + 5000;
+        windowEnd = min(nextCue, trialWindowEnd);
+
+        % Exclude if cue occurs within 1000 ms of the previous lick
+        if cue - lastLickTime < 1000
+            continue;
+        end
+
+        % Exclude if lever press occurs within -500ms before cue
+        if any(leverTimes >= (cue - 500) & leverTimes < cue)
+            continue;
+        end
+
+        % consider only first lever press after cue
+        leverThis = leverTimes(leverTimes > cue & leverTimes < windowEnd);
+        if isempty(leverThis), continue; end
+        firstLever = leverThis(1);
+        leverRT = firstLever - cue;
+
+        % Reject if lever press not in 200–3000 ms
+        if leverRT < 200 || leverRT > 2000, continue; end
+
+        %Get first lick after cue
+        lickThis = lickTimes(lickTimes > cue & lickTimes < windowEnd);
+        if isempty(lickThis), continue; end
+        firstLick = lickThis(1);
+        lickRT = firstLick - cue;
+
+        % Reject if lick before lever or outside 400–3000 ms window
+        if firstLick < firstLever || lickRT < 400 || lickRT > 3000, continue; end
+
+        trialCounter = trialCounter + 1;
+        trialCounterGlobal = trialCounterGlobal + 1;
+        trials(trialCounter).cue = cue;
+        trials(trialCounter).lever = firstLever;
+        trials(trialCounter).lick = firstLick;
+
+        % Update lastLickTime
+        lastLickTime = firstLick;
+
+        % storage for plotting
+        leverRTs_all(end+1) = leverRT;
+        lickRTs_all(end+1) = lickRT;
+        trialIdxs_all(end+1) = trialCounterGlobal;
+    end
+
+    % Store valid trials
+    trials_final.(['session' num2str(sessionIdx)]) = trials;
+end
+
+% plotting filtered trial timings
+figure;
+hold on;
+scatter(leverRTs_all, trialIdxs_all, 15, 'r', 'filled', 'DisplayName', 'Lever Press');
+scatter(lickRTs_all, trialIdxs_all, 15, 'b', 'filled', 'DisplayName', 'First Lick After Lever Press');
+xline(0, 'k--', 'DisplayName', 'Cue Onset');
+xlabel('Time from Cue Onset (ms)', 'FontSize', 15);
+ylabel('Trial Index (stacked by session)', 'FontSize', 15);
+title('Filtered Lever and Lick Timing Across Sessions', 'FontSize', 20);
+legend('FontSize', 10);
+set(gca, 'FontSize', 15, 'YDir', 'reverse');
+ylim([0 trialCounterGlobal]);
+grid on;
+
+[sortedLeverRTs, sortIdx] = sort(leverRTs_all);
+sortedLickRTs = lickRTs_all(sortIdx);
+sortedTrialIdxs = 1:length(sortIdx);
+
+figure;
+hold on;
+scatter(sortedLeverRTs, sortedTrialIdxs, 15, 'r', 'filled');
+scatter(sortedLickRTs, sortedTrialIdxs, 15, 'b', 'filled');
+xline(0, 'k--');
+xlabel('Time from Cue Onset (ms)', 'FontSize', 15);
+ylabel('Trial Index (sorted by lever press latency)', 'FontSize', 15);
+title('Lever and Lick Timing (Sorted by Lever RT)', 'FontSize', 18);
+legend({'Lever Press','First Lick After Lever Press'}, 'FontSize', 10);
+set(gca, 'YDir', 'reverse');
+ylim([0 length(sortedLeverRTs)]);
+grid on;
+
+% save for further calculations
+save('trials_final.mat', 'trials_final');
+fprintf('Saved structured filtered trials to trials_final.mat\n');
