@@ -1,0 +1,297 @@
+% code with inspiration from Olveczky lab
+%Load required data
+load('ratBEHstruct_unit_firstsection_trial3.mat');
+load('trials_final.mat');
+
+fs = 30000;  % sampling rate in Hz
+
+cell_type_all = {};
+peak_to_valley_all = {};
+hwhm_all = {};
+isi_all = {};
+fr_all = {};
+
+% extracting list of sessions with valid trials
+validSessions = fieldnames(trials_final);
+validSessionNums = cellfun(@(x) sscanf(x, 'session%d'), validSessions);
+
+for sess_idx = 1:length(avgwaveforms)
+    if ~ismember(sess_idx, validSessionNums)
+        continue;
+    end
+
+    waveforms_sess = avgwaveforms{sess_idx};
+    avgISI_sess = avgISI{sess_idx};
+    avgFR_sess = avgFR{sess_idx};
+    session_spikes = ratBEHstruct_unit(sess_idx).spikes;
+
+    cell_type_all{sess_idx} = cell(size(waveforms_sess));
+    peak_to_valley_all{sess_idx} = cell(size(waveforms_sess));
+    hwhm_all{sess_idx} = cell(size(waveforms_sess));
+    isi_all{sess_idx} = cell(size(waveforms_sess));
+    fr_all{sess_idx} = cell(size(waveforms_sess));
+
+    trials = trials_final.(sprintf('session%d', sess_idx));
+
+    for ch = 1:length(waveforms_sess)
+        for u = 1:length(waveforms_sess{ch})
+            if ch > size(session_spikes, 2) || u > length(session_spikes{1,ch})
+                continue;
+            end
+            st = double(session_spikes{1,ch}{u});
+            if isempty(st), continue; end
+
+            active = false;
+            for t = 1:length(trials)
+                trial = trials(t);
+                if ~isfield(trial, 'cue') || ~isfield(trial, 'lick')
+                    continue;
+                end
+                cue = double(trial.cue);
+                lick = double(trial.lick);
+                if any(st > cue & st < lick)
+                    active = true;
+                    break;
+                end
+            end
+
+            if ~active
+                continue;
+            end
+
+            if ~isempty(waveforms_sess{ch}{u}) && ...
+               ch <= length(avgISI_sess) && u <= length(avgISI_sess{ch}) && ...
+               ~isempty(avgISI_sess{ch}{u}) && ~isempty(avgFR_sess{ch}{u})
+
+                waveform = waveforms_sess{ch}{u};
+                isi_vector = avgISI_sess{ch}{u};
+                isi_val = mean(isi_vector) / fs * 1000;  % in ms
+                isi_all{sess_idx}{ch}{u} = isi_val;
+
+                fr_val = avgFR_sess{ch}{u};  % Hz
+                fr_all{sess_idx}{ch}{u} = fr_val;
+
+                waveform_mat = nan(4,64);
+                for i = 1:4
+                    waveform_mat(i,:) = waveform((i-1)*64 + (1:64));
+                end
+                [amp,ind] = min(min(waveform_mat,[],2));
+                biggest_waveform = waveform_mat(ind,:);
+                biggest_waveform = interp1(1:64, biggest_waveform, linspace(1,64,1000));
+
+                % filtering based on waveform amplitude
+                max_amp = max(biggest_waveform);
+                min_amp = min(biggest_waveform);
+                ptp_amp = max_amp - min_amp;
+
+% filtering for noise to reject units with unusually small or large amplitude or large upward spike
+                if abs(max_amp) > 4 * abs(min_amp) || ptp_amp < 0.05 || ptp_amp > 100
+                    continue;
+                end
+
+                micros_per_bin = 1e6/fs*64/1000;
+
+
+                [~, peak_bin] = min(biggest_waveform);
+                [~, valley_bin] = max(biggest_waveform(peak_bin:end));
+                valley_bin = valley_bin + peak_bin;
+                ptv = (valley_bin - peak_bin)*micros_per_bin;
+                peak_to_valley_all{sess_idx}{ch}{u} = ptv;
+
+                baseline = mean(biggest_waveform(1:100));
+                wv_range = baseline - amp;
+                half_min = wv_range./2 + amp;
+                [~, cl_ind_min_left] = min(abs(half_min - biggest_waveform(1:peak_bin)));
+                [~, cl_index_right] = min(abs(half_min - biggest_waveform(peak_bin+1:end)));
+                cl_ind_min_right = cl_index_right + peak_bin;
+                hwhm_val = (cl_ind_min_right - cl_ind_min_left)*micros_per_bin;
+                hwhm_all{sess_idx}{ch}{u} = hwhm_val;
+
+                if ~isempty(hwhm_val) && ~isempty(ptv)
+                    if fr_val < 6 && hwhm_val > 250 && hwhm_val < 325 && isi_val > 2 && isi_val < 300
+                        cell_type_all{sess_idx}{ch}{u} = 3; % TAN
+                    elseif fr_val > 2 && hwhm_val < 250 && isi_val < 2000 && isi_val > 2 && ptv < 350
+                        cell_type_all{sess_idx}{ch}{u} = 2; % FSI
+                    elseif fr_val < 5  && hwhm_val > 75 && hwhm_val < 300 && isi_val > 2 && isi_val < 1000 && ptv > 350
+                        cell_type_all{sess_idx}{ch}{u} = 1; % MSN
+                    else
+                        cell_type_all{sess_idx}{ch}{u} = 0;
+                    end
+                else
+                    cell_type_all{sess_idx}{ch}{u} = 0;
+                end
+            end
+        end
+    end
+end
+
+save('celltype_all_sessions_filtered.mat', 'cell_type_all', 'peak_to_valley_all', 'hwhm_all', 'isi_all', 'fr_all');
+fprintf('Saved classifications for filtered units to "celltype_all_sessions_filtered.mat"\n');
+
+
+
+% 3D Scatterplot: HWHM vs Peak-to-Valley vs Firing Rate
+figure; hold on;
+
+ptv_msn = []; ptv_fsi = []; ptv_tan = []; ptv_unc = [];
+hwhm_msn = []; hwhm_fsi = []; hwhm_tan = []; hwhm_unc = [];
+fr_msn = []; fr_fsi = []; fr_tan = []; fr_unc = [];
+
+for sess = 1:length(cell_type_all)
+    for ch = 1:length(cell_type_all{sess})
+        for u = 1:length(cell_type_all{sess}{ch})
+            val = cell_type_all{sess}{ch}{u};
+            if iscell(val), val = val{1}; end
+
+            if isempty(val) || ...
+               isempty(peak_to_valley_all{sess}{ch}{u}) || ...
+               isempty(hwhm_all{sess}{ch}{u}) || ...
+               isempty(fr_all{sess}{ch}{u})
+                continue;
+            end
+
+            ptv = peak_to_valley_all{sess}{ch}{u} / 1000;
+            hwhm = hwhm_all{sess}{ch}{u} / 1000;
+            fr = fr_all{sess}{ch}{u};
+
+            switch val
+                case 0
+                    ptv_unc(end+1) = ptv;
+                    hwhm_unc(end+1) = hwhm;
+                    fr_unc(end+1) = fr;
+                case 1
+                    ptv_msn(end+1) = ptv;
+                    hwhm_msn(end+1) = hwhm;
+                    fr_msn(end+1) = fr;
+                case 2
+                    ptv_fsi(end+1) = ptv;
+                    hwhm_fsi(end+1) = hwhm;
+                    fr_fsi(end+1) = fr;
+                case 3
+                    ptv_tan(end+1) = ptv;
+                    hwhm_tan(end+1) = hwhm;
+                    fr_tan(end+1) = fr;
+            end
+        end
+    end
+end
+
+% unit classification
+scatter3(hwhm_msn, ptv_msn, fr_msn, 50, [0.2 0.4 1], 'filled');   % MSN - blue
+scatter3(hwhm_fsi, ptv_fsi, fr_fsi, 50, [0.2 1 0.4], 'filled');   % FSI - green
+scatter3(hwhm_tan, ptv_tan, fr_tan, 50, [1 0.4 0.2], 'filled');   % TAN - red
+scatter3(hwhm_unc, ptv_unc, fr_unc, 25, [0.6 0.6 0.6], 'filled'); % Unclassified - gray
+
+xlabel('Half-Max Width (ms)', 'FontSize', 13);
+ylabel('Peak-to-Valley Time (ms)', 'FontSize', 13);
+zlabel('Firing Rate (Hz)', 'FontSize', 15);
+title('Waveform Features and Firing Rate', 'FontSize', 15);
+set(gca, 'ZScale', 'log');  % log scale for firing rate
+legend({'MSN', 'FSI', 'TAN', 'Unclassified'}, 'Location', 'northeast', 'FontSize', 13);
+grid on; view(135, 25);
+
+fprintf('3D scatterplot generated successfully.\n');
+
+% bar chart
+count_unclassified = 0;
+count_msn = 0;
+count_fsi = 0;
+count_tan = 0;
+
+for sess_idx = validSessionNums(:)'  % only include valid sessions
+    if isempty(cell_type_all{sess_idx}), continue; end
+    for ch = 1:length(cell_type_all{sess_idx})
+        for u = 1:length(cell_type_all{sess_idx}{ch})
+            val = cell_type_all{sess_idx}{ch}{u};
+            if iscell(val), val = val{1}; end
+            if isempty(val), continue; end
+
+            switch val
+                case 0
+                    count_unclassified = count_unclassified + 1;
+                case 1
+                    count_msn = count_msn + 1;
+                case 2
+                    count_fsi = count_fsi + 1;
+                case 3
+                    count_tan = count_tan + 1;
+            end
+        end
+    end
+end
+
+figure;
+b = bar([count_unclassified, count_msn, count_fsi, count_tan]);
+b.FaceColor = 'flat';
+b.CData = [0.6 0.6 0.6; 0.2 0.4 1; 0.2 1 0.4; 1 0.4 0.2];
+xticks(1:4);
+xticklabels({'Unclassified','MSN','FSI','TAN'});
+set(gca, 'FontSize', 14);
+ylabel('Count', 'FontSize', 15);
+title('Cell Type Classification', 'FontSize', 15);
+grid on;
+
+% Stacked histograms
+isi_msn = []; isi_fsi = []; isi_tan = [];
+
+for sess = validSessionNums(:)'
+    if isempty(cell_type_all{sess}), continue; end
+    for ch = 1:length(cell_type_all{sess})
+        for u = 1:length(cell_type_all{sess}{ch})
+            val = cell_type_all{sess}{ch}{u};
+            if iscell(val), val = val{1}; end
+            if isempty(val) || isempty(isi_all{sess}{ch}{u})
+                continue;
+            end
+            isi_val = isi_all{sess}{ch}{u};
+            switch val
+                case 1
+                    isi_msn(end+1) = isi_val;
+                case 2
+                    isi_fsi(end+1) = isi_val;
+                case 3
+                    isi_tan(end+1) = isi_val;
+            end
+        end
+    end
+end
+
+figure;
+features = {
+    {ptv_msn, ptv_fsi, ptv_tan}, 'Peak-to-Valley Time (ms)', 'Peak-to-Valley';
+    {hwhm_msn, hwhm_fsi, hwhm_tan}, 'HWHM (ms)', 'HWHM';
+    {fr_msn, fr_fsi, fr_tan}, 'Avg Firing Rate (Hz)', 'Avg Firing Rate';
+    {isi_msn, isi_fsi, isi_tan}, 'Avg ISI (ms)', 'Avg ISI'
+};
+colors = {[0.2 0.4 1], [0.2 1 0.4], [1 0.4 0.2]};
+
+for i = 1:4
+    subplot(2,2,i); hold on;
+    data = features{i,1};
+    all_data = [data{:}];
+    
+    if isempty(all_data)
+        title([features{i,3} ' (No data)'], 'FontSize', 15);
+        continue;
+    end
+
+    edges = linspace(min(all_data), max(all_data), 30);
+
+    counts = zeros(3, length(edges)-1);
+    for j = 1:3
+        counts(j,:) = histcounts(data{j}, edges);
+    end
+    b = bar(edges(1:end-1) + diff(edges)/2, counts', 'stacked');
+    for j = 1:3
+        b(j).FaceColor = colors{j};
+        b(j).EdgeColor = 'k';
+    end
+    xlabel(features{i,2});
+    ylabel('Count');
+    title([features{i,3}], 'FontSize', 15);
+    set(gca, 'FontSize', 14);
+    if i == 1
+        legend({'MSN', 'FSI', 'TAN'});
+    end
+end
+
