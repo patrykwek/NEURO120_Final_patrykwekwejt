@@ -1,0 +1,180 @@
+% Load required data
+load('ratBEHstruct_unit_firstsection_trial3.mat');
+load('trials_final.mat');
+load('celltype_all_sessions_filtered.mat');
+
+fs = 30000;  % in Hz
+numClusters = 5;
+
+% sessions with valid trials
+validSessions = fieldnames(trials_final);
+validSessionNums = cellfun(@(x) sscanf(x, 'session%d'), validSessions);
+
+allWaveforms = [];
+unitMetadata = [];
+
+for sess = 1:length(avgwaveforms)
+    if ~ismember(sess, validSessionNums)
+        continue;
+    end
+    waveforms_sess = avgwaveforms{sess};
+    session_spikes = ratBEHstruct_unit(sess).spikes;
+    trials = trials_final.(sprintf('session%d', sess));
+
+    for ch = 1:length(waveforms_sess);
+        for u = 1:length(waveforms_sess{ch})
+            if isempty(waveforms_sess{ch}{u}) || ...
+               ch > size(session_spikes, 2) || u > length(session_spikes{1,ch}) || ...
+               isempty(session_spikes{1,ch}{u})
+                continue;
+            end
+
+            st = double(session_spikes{1,ch}{u});
+            active = false;
+            for t = 1:length(trials)
+                trial = trials(t);
+                if ~isfield(trial, 'cue') || ~isfield(trial, 'lick')
+                    continue;
+                end
+                cue = double(trial.cue);
+                lick = double(trial.lick);
+                if any(st > cue & st < lick)
+                    active = true;
+                    break;
+                end
+            end
+            if ~active
+                continue;
+            end
+
+            if isempty(cell_type_all{sess}) || ...
+               ch > length(cell_type_all{sess}) || ...
+               u > length(cell_type_all{sess}{ch}) || ...
+               isempty(cell_type_all{sess}{ch}{u}) || cell_type_all{sess}{ch}{u} == 0
+                continue;
+            end
+
+            wf = waveforms_sess{ch}{u};
+            wf_mat = reshape(wf, 64, 4)';
+            [~, idx] = min(min(wf_mat, [], 2));
+            selected = wf_mat(idx, :);
+            [~, peak_idx] = min(selected);
+            [~, peak_alt_idx] = max(selected);
+            peak = peak_idx;
+            if abs(min(selected)) <= abs(max(selected))
+                peak = peak_alt_idx;
+            end
+            shift = round(length(selected)/2) - peak;
+            aligned = circshift(selected, shift);
+            interp_wf = interp1(1:64, aligned, linspace(1,64,200), 'linear', 'extrap');
+
+            allWaveforms(end+1, :) = interp_wf;
+            unitMetadata(end+1, :) = [sess, ch, u];
+        end
+    end
+end
+
+% Normalize
+allWaveforms = zscore(allWaveforms, 0, 2);
+[coeff, score, ~] = pca(allWaveforms);
+kmeans_input = score(:,1:5);
+
+% k-means clustering
+rng(1);
+[clusterIdx, ~] = kmeans(kmeans_input, numClusters, 'Replicates', 10);
+
+% Compute and smooth centroids
+centroids = zeros(numClusters, size(allWaveforms, 2));
+for k = 1:numClusters
+    raw = mean(allWaveforms(clusterIdx == k,:), 1);
+    smoothed = smoothdata(raw, 'gaussian', 15);  % 15-point Gaussian smoothing
+    centroids(k,:) = smoothed;
+end
+
+
+% waveform features for clustered units
+ptv_vals = [];
+hwhm_vals = [];
+fr_vals = [];
+
+for i = 1:size(unitMetadata, 1)
+    sess = unitMetadata(i, 1);
+    ch   = unitMetadata(i, 2);
+    u    = unitMetadata(i, 3);
+
+    ptv = peak_to_valley_all{sess}{ch}{u};
+    hwhm = hwhm_all{sess}{ch}{u};
+    fr = fr_all{sess}{ch}{u};
+
+    if isempty(ptv) || isempty(hwhm) || isempty(fr)
+        ptv_vals(end+1,1) = NaN;
+        hwhm_vals(end+1,1) = NaN;
+        fr_vals(end+1,1) = NaN;
+    else
+        ptv_vals(end+1,1) = ptv / 1000;     % ms
+        hwhm_vals(end+1,1) = hwhm / 1000;   % ms
+        fr_vals(end+1,1) = fr;              % Hz
+    end
+end
+
+% Filter valid features
+valid_feature_idx = ~isnan(ptv_vals) & ~isnan(hwhm_vals) & ~isnan(fr_vals);
+ptv_vals = ptv_vals(valid_feature_idx);
+hwhm_vals = hwhm_vals(valid_feature_idx);
+fr_vals = fr_vals(valid_feature_idx);
+clusterIdx_valid = clusterIdx(valid_feature_idx);
+
+%PLOTS
+figure('Position', [100, 100, 800, 1000]);
+t = tiledlayout(2, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
+colors = lines(numClusters);
+
+% 1 - PCA Scatterplot
+nexttile;
+gscatter(score(:,1), score(:,2), clusterIdx, colors);
+legend off;
+xlabel('PC 1', 'FontSize', 12);
+ylabel('PC 2', 'FontSize', 12);
+title('K-means Cluster Scatterplot (PCA)', 'FontSize', 14);
+grid on;
+axis square;
+
+% 2 -3D Feature Scatter
+nexttile; hold on;
+for k = 1:numClusters
+    cluster_points = (clusterIdx_valid == k);
+    scatter3(hwhm_vals(cluster_points), ptv_vals(cluster_points), fr_vals(cluster_points), ...
+        30, colors(k,:), 'filled');
+end
+xlabel('HWHM (ms)', 'FontSize', 12);
+ylabel('PTV (ms)', 'FontSize', 12);
+zlabel('Firing Rate (Hz)', 'FontSize', 12);
+title('Feature Space: HWHM vs PTV vs FR', 'FontSize', 14);
+set(gca, 'ZScale', 'log');
+view(135, 25);
+grid on;
+axis square;
+
+% 3 - Example Waveforms
+nexttile; hold on;
+for k = 1:numClusters
+    idx = find(clusterIdx == k);
+    plot(allWaveforms(idx(1:min(50,end)), :)', 'Color', [colors(k,:) 0.1]);
+end
+xlabel('Time', 'FontSize', 12);
+ylabel('Amplitude', 'FontSize', 12);
+title('Example Waveforms per Cluster', 'FontSize', 14);
+grid on;
+axis square;
+
+% 4 - Cluster Centroids
+nexttile; hold on;
+for k = 1:numClusters
+    plot(centroids(k,:), 'Color', colors(k,:), 'LineWidth', 2);
+end
+xlabel('Interpolated Timepoints', 'FontSize', 12);
+ylabel('Amplitude', 'FontSize', 12);
+title('Cluster Centroids', 'FontSize', 14);
+legend(arrayfun(@(k) sprintf('Cluster %d', k), 1:numClusters, 'UniformOutput', false), 'FontSize', 10);
+grid on;
+axis square;
