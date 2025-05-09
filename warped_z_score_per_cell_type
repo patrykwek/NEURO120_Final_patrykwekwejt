@@ -1,0 +1,104 @@
+% Loading normalized spike dataset and filtered cells
+cd /Volumes/WD_BLACK
+load('vector_times_full.mat');
+load('celltype_all_sessions_filtered.mat');
+load('trials_final.mat');
+
+% bin settings
+nBins = 100;
+binEdges = linspace(0, 4, nBins + 1);
+binCenters = (binEdges(1:end-1) + binEdges(2:end)) / 2;
+binSize = mean(diff(binEdges));
+
+% Unique unit identifiers across sessions
+unitKeys = arrayfun(@(x) sprintf('%d_%d_%d', ...
+    vector_times(x).session, ...
+    vector_times(x).channel, ...
+    vector_times(x).unit), ...
+    1:length(vector_times), 'UniformOutput', false);
+[uniqueUnits, ~, unitIdx] = unique(unitKeys);
+
+% Valid session numbers
+validSessions = fieldnames(trials_final);
+validSessionNums = cellfun(@(x) sscanf(x, 'session%d'), validSessions);
+
+zFR_by_type = struct('MSN', [], 'FSI', [], 'TAN', []);
+
+% z-scored FR for each unit
+zFR_all = zeros(length(uniqueUnits), nBins);
+unitLabels = zeros(length(uniqueUnits), 1); % 0 = unclassified
+
+for i = 1:length(uniqueUnits)
+    ids = sscanf(uniqueUnits{i}, '%d_%d_%d');
+    sess = ids(1); ch = ids(2); u = ids(3);
+
+    % Skip if not a valid session
+    if ~ismember(sess, validSessionNums)
+        continue;
+    end
+
+    % to skip if not classified or classification is 0
+    if sess > length(cell_type_all) || ch > length(cell_type_all{sess}) || ...
+       u > length(cell_type_all{sess}{ch}) || isempty(cell_type_all{sess}{ch}{u}) || cell_type_all{sess}{ch}{u} == 0
+        continue;
+    end
+
+    val = cell_type_all{sess}{ch}{u};
+    unitLabels(i) = val;
+
+    inds = find(unitIdx == i);
+    normTimes = [vector_times(inds).segment] + [vector_times(inds).from_prev];
+    fr = histcounts(normTimes, binEdges) / binSize;
+    if std(fr) > 0
+        z = (fr - mean(fr)) / std(fr);
+        zFR_all(i,:) = z;
+
+        switch val
+            case 1, zFR_by_type.MSN(end+1,:) = z;
+            case 2, zFR_by_type.FSI(end+1,:) = z;
+            case 3, zFR_by_type.TAN(end+1,:) = z;
+        end
+    end
+end
+
+% setup for plots
+types = {'MSN', 'FSI', 'TAN'};
+labels = {'Cue', 'Lever', 'Lick'};
+fig = figure('Position', [100, 100, 1200, 400]);
+
+for t = 1:3
+    type = types{t};
+    zMat = zFR_by_type.(type);
+    subplot(1,3,t);
+    if ~isempty(zMat)
+        [~, peakSortIdx] = max(zMat, [], 2);
+        [~, unitOrder] = sort(peakSortIdx);
+        zMatSorted = zMat(unitOrder,:);
+
+        % smoothing within each unit
+        smoothSigmaBins = 1.5;
+        kernelSize = round(smoothSigmaBins * 6);
+        g = gausswin(kernelSize);
+        g = g / sum(g);
+        zMatSmoothed = zeros(size(zMatSorted));
+        for row = 1:size(zMatSorted, 1)
+            zMatSmoothed(row, :) = conv(zMatSorted(row, :), g, 'same');
+        end
+
+        imagesc(binCenters, 1:size(zMatSmoothed, 1), zMatSmoothed);
+        colormap(flipud(gray));
+        colorbar;
+        caxis([-1 2]);
+        xlabel('Normalized Trial Time', 'FontSize', 15);
+        ylabel('Unit #', 'FontSize', 15);
+        title([type ' Units'], 'FontSize', 18);
+        xline(1, '--g', 'Cue', 'LineWidth', 1.2);
+        xline(2, '--b', 'Lever', 'LineWidth', 1.2);
+        xline(3, '--r', 'Lick', 'LineWidth', 1.2);
+    else
+        title([type ' (no data)']);
+    end
+end
+
+saveas(fig, '/Volumes/WD_BLACK/NEURO120/plots/zFR_byType_from_vector_times.png');
+fprintf('Saved cell-type specific normalized activity plots.\n');
