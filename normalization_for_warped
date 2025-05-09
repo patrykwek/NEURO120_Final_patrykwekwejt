@@ -1,0 +1,86 @@
+% Normalization needed for warping plotting further
+% Load data
+cd /Volumes/WD_BLACK
+load('ratBEHstruct_unit_firstsection_trial3.mat');
+load('trials_final.mat');
+
+% Initialize output struct
+vector_times = struct('session', {}, 'channel', {}, 'unit', {}, ...
+                      'trial', {}, 'segment', {}, 'from_prev', {});
+
+% looping through sessions
+for sess = 1:length(ratBEHstruct_unit)
+    sessField = sprintf('session%d', sess);
+    if ~isfield(trials_final, sessField), continue; end
+    trials = trials_final.(sessField);
+    session = ratBEHstruct_unit(sess);
+    spikes = session.spikes;
+
+    for ch = 1:size(spikes,2)
+        for u = 1:length(spikes{1,ch})
+            st = double(spikes{1,ch}{u});
+            if isempty(st), continue; end
+
+            for t = 1:length(trials)
+                trial = trials(t);
+                if ~isfield(trial, 'cue') || ~isfield(trial, 'lever') || ~isfield(trial, 'lick'), continue; end
+                cue = double(trial.cue);
+                lever = double(trial.lever);
+                lick = double(trial.lick);
+                if any(isnan([cue, lever, lick])), continue; end
+
+                % Segment 0 -500 ms to cue
+                pre_window = 500;
+                seg0_start = cue - pre_window;
+                seg0_end = cue;
+                idx = find(st >= seg0_start & st < seg0_end);
+                for i = 1:length(idx)
+                    spike_time = st(idx(i));
+                    norm_time = (spike_time - seg0_start) / pre_window;
+                    vector_times(end+1) = struct('session', sess, 'channel', ch, 'unit', u, ...
+                        'trial', t, 'segment', 0, 'from_prev', norm_time);
+                end
+
+                % Segment 1 cue to leverpress
+                dur1 = lever - cue;
+                if dur1 > 0
+                    idx = find(st >= cue & st < lever);
+                    for i = 1:length(idx)
+                        spike_time = st(idx(i));
+                        norm_time = (spike_time - cue) / dur1;
+                        vector_times(end+1) = struct('session', sess, 'channel', ch, 'unit', u, ...
+                            'trial', t, 'segment', 1, 'from_prev', norm_time);
+                    end
+                end
+
+                % Segment 2 lever to lick
+                dur2 = lick - lever;
+                if dur2 > 0
+                    idx = find(st >= lever & st < lick);
+                    for i = 1:length(idx)
+                        spike_time = st(idx(i));
+                        norm_time = (spike_time - lever) / dur2;
+                        vector_times(end+1) = struct('session', sess, 'channel', ch, 'unit', u, ...
+                            'trial', t, 'segment', 2, 'from_prev', norm_time);
+                    end
+                end
+
+                % Segment 3 lick to +1000 ms
+                post_window = 1000;
+                seg3_start = lick;
+                seg3_end = lick + post_window;
+                idx = find(st >= seg3_start & st < seg3_end);
+                for i = 1:length(idx)
+                    spike_time = st(idx(i));
+                    norm_time = (spike_time - seg3_start) / post_window;
+                    vector_times(end+1) = struct('session', sess, 'channel', ch, 'unit', u, ...
+                        'trial', t, 'segment', 3, 'from_prev', norm_time);
+                end
+            end
+        end
+    end
+end
+
+% saving for further use
+save('vector_times_full.mat', 'vector_times');
+fprintf('Saved %d entries to "vector_times_full.mat"\n', numel(vector_times));
