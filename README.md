@@ -9,3 +9,4 @@ This project consists of seven key MATLAB script files:
 - warped_z_score_per_cell_type, which applies z-scoring to neural activity traces separately for each classified cell type.
 
 Data is currently stored on my hard drive and because of the size constraints it is not uploaded in any other accessible formats. I am of course ready to share it anytime on request!
+.prj file is a MATLAB version of requirements.txt I created separately.
