@@ -1,0 +1,132 @@
+% normalized dataset load
+load('vector_times_full.mat');  % contains vector_times struct
+load('celltype_all_sessions_filtered.mat');  % load cell type classifications (filtered)
+load('trials_final.mat');
+
+% Bin settings
+nBins = 100;
+binEdges = linspace(0, 4, nBins + 1);
+binCenters = (binEdges(1:end-1) + binEdges(2:end)) / 2;
+binSize = mean(diff(binEdges));
+
+% unique unit identifiers across sessions
+unitKeys = arrayfun(@(x) sprintf('%d_%d_%d', ...
+    vector_times(x).session, ...
+    vector_times(x).channel, ...
+    vector_times(x).unit), ...
+    1:length(vector_times), 'UniformOutput', false);
+[uniqueUnits, ~, unitIdx] = unique(unitKeys);
+
+zFR_all = zeros(length(uniqueUnits), nBins);
+celltype_idx = zeros(length(uniqueUnits), 1);
+valid_unit_mask = false(length(uniqueUnits), 1);
+
+% List of valid session numbers
+validSessions = fieldnames(trials_final);
+validSessionNums = cellfun(@(x) sscanf(x, 'session%d'), validSessions);
+
+% spike times and binning
+for i = 1:length(uniqueUnits)
+    meta = sscanf(uniqueUnits{i}, '%d_%d_%d');
+    sess = meta(1); ch = meta(2); u = meta(3);
+
+    % Skip if session not in trials_final
+    if ~ismember(sess, validSessionNums)
+        continue;
+    end
+
+    % Check if classified
+    if sess <= length(cell_type_all) && ch <= length(cell_type_all{sess}) && u <= length(cell_type_all{sess}{ch})
+        val = cell_type_all{sess}{ch}{u};
+        if ~isempty(val) && val ~= 0
+            celltype_idx(i) = val;
+            valid_unit_mask(i) = true;
+
+            inds = find(unitIdx == i);
+            normTimes = [vector_times(inds).segment] + [vector_times(inds).from_prev];
+            fr = histcounts(normTimes, binEdges) / binSize;
+
+            % Z-score
+            if std(fr) > 0
+                zFR_all(i,:) = (fr - mean(fr)) / std(fr);
+            end
+        end
+    end
+end
+
+% keeping only classified units
+zFR_all = zFR_all(valid_unit_mask, :);
+celltype_idx = celltype_idx(valid_unit_mask);
+
+% smoothing
+sigma = 1.5;  % in bins
+winSize = round(6 * sigma);  % total window size
+x = -winSize:winSize;
+g = exp(-x.^2 / (2*sigma^2));
+g = g / sum(g);
+
+% 1D convolution smoothing
+zFR_smooth = zeros(size(zFR_all));
+for i = 1:size(zFR_all,1)
+    zFR_smooth(i,:) = conv(zFR_all(i,:), g, 'same');
+end
+
+% sorting units by time of peak firing
+[~, peakLocs] = max(zFR_smooth, [], 2);
+[~, sortIdx] = sort(peakLocs);
+
+% figure with two subplots
+fig = figure('Position', [100, 100, 800, 800]);
+
+% heatmap (top)
+ax1 = axes('Position', [0.1 0.55 0.75 0.4]);
+imagesc(binCenters, 1:size(zFR_smooth,1), zFR_smooth(sortIdx,:));
+colormap(flipud(gray));
+colorbar;
+caxis([-1 2]);
+xlabel('Normalized Trial Time', 'FontSize', 15);
+ylabel('Unit #', 'FontSize', 15);
+title('Z-scored Unit Activity', 'FontSize', 18);
+xline(1, '--g', 'Cue', 'LineWidth', 1.5, ...
+    'LabelVerticalAlignment', 'bottom', 'FontSize', 12);
+xline(2, '--b', 'Lever', 'LineWidth', 1.5, ...
+    'LabelVerticalAlignment', 'bottom', 'FontSize', 12);
+xline(3, '--r', 'Lick', 'LineWidth', 1.5, ...
+    'LabelVerticalAlignment', 'bottom', 'FontSize', 12);
+
+% avg traces (bottom)
+ax2 = axes('Position', [0.1 0.06 0.70 0.4]); hold on;
+types = {'MSN', 'FSI', 'TAN'};
+colors_rgb = struct('MSN', [0.2 0.4 1], 'FSI', [0.2 1 0.4], 'TAN', [1 0.4 0.2]);
+legend_entries = {};
+legend_handles = [];
+
+for t = 1:3
+    type_id = t;
+    type_name = types{t};
+    idx = celltype_idx == type_id;
+    if sum(idx) == 0, continue; end
+
+    m = mean(zFR_smooth(idx,:), 1);
+    s = std(zFR_smooth(idx,:), 0, 1) / sqrt(sum(idx));
+    fill([binCenters binCenters(end:-1:1)], [m+s m(end:-1:1)-s], ...
+        colors_rgb.(type_name), 'FaceAlpha', 0.2, 'EdgeColor', 'none');
+    plotHandle = plot(binCenters, m, 'Color', colors_rgb.(type_name), 'LineWidth', 2);
+    legend_handles(end+1) = plotHandle;
+    legend_entries{end+1} = type_name;
+end
+
+% All units
+m = mean(zFR_smooth, 1);
+s = std(zFR_smooth, 0, 1) / sqrt(size(zFR_smooth,1));
+fill([binCenters binCenters(end:-1:1)], [m+s m(end:-1:1)-s], ...
+    [0.5 0.5 0.5], 'FaceAlpha', 0.2, 'EdgeColor', 'none');
+plotHandle = plot(binCenters, m, 'k--', 'LineWidth', 1.5);
+legend_handles(end+1) = plotHandle;
+legend_entries{end+1} = 'All Units';
+
+xlabel('Normalized Trial Time (Segmented)', 'FontSize', 15);
+ylabel('Z-scored Firing Rate', 'FontSize', 15);
+title('Average Activity by Cell Type', 'FontSize', 18);
+legend(legend_handles, legend_entries, 'Location', 'best', 'FontSize', 12);
+grid on;
